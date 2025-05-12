@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Interactive 3D SPH Fluid Simulation within an Invisible Cube (Visible Gravity)</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      overflow: hidden;
+    }
+    header {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.8);
+      z-index: 100;
+    }
+    main {
+      height: 100vh;
+    }
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div id="hamburger">☰</div>
+    <nav id="nav-items" style="display: none;"></nav>
+    <input id="input1" type="number" placeholder="Particle Count (1 - 100000)" min="1" max="100000" value="1000">
+  </header>
+  <main></main>
+  <!-- Include Three.js and OrbitControls -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script>
+    // Basic hamburger menu functionality.
+    document.addEventListener('DOMContentLoaded', function () {
+      const hamburger = document.getElementById('hamburger');
+      const navItems = document.getElementById('nav-items');
+      hamburger.addEventListener('click', function () {
+        hamburger.classList.toggle('active');
+        navItems.style.display = navItems.style.display === 'block' ? 'none' : 'block';
+      });
+    });
+
+    window.addEventListener('DOMContentLoaded', () => {
+      // Particle count control.
+      const inputField = document.getElementById('input1');
+      let particleCount = parseInt(inputField.value) || 1000;
+
+      // SPH simulation parameters.
+      const mass = 1.0;
+      const dt = 0.0005;                  // Smaller time step for smoother integration.
+      const gravity = -1000000;              // Increased gravity; effective acceleration will be ~gravity/density.
+      const restDensity = 1000;          // Rest density of the fluid.
+      const stiffness = 500;            // Pressure stiffness.
+      const viscosityCoefficient = 0.5;  // Viscosity coefficient.
+      const smoothingLength = 0.1;       // Smoothing length (h).
+
+      // Precomputed kernel normalization factors for 3D.
+      const poly6Factor = 315 / (64 * Math.PI * Math.pow(smoothingLength, 9));
+      const spikyGradFactor = -45 / (Math.PI * Math.pow(smoothingLength, 6));
+      const viscosityLapFactor = 45 / (Math.PI * Math.pow(smoothingLength, 6));
+
+      // Domain boundaries for the invisible cube and grid cell size.
+      const domainMin = -1;
+      const domainMax = 1;
+      const cellSize = smoothingLength;
+
+      // Arrays for particle properties.
+      let positions, velocities, densities, pressures;
+      let particleSystem;
+
+      // Global variables for additional user interaction.
+      let mousePos = new THREE.Vector3();
+      let isMouseDown = false;
+      let isShiftDown = false;
+      document.addEventListener('keydown', (event) => { if (event.key === "Shift") isShiftDown = true; });
+      document.addEventListener('keyup', (event) => { if (event.key === "Shift") isShiftDown = false; });
+
+      // Set up Three.js scene, camera, renderer, and controls.
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 100);
+      camera.position.z = 3;
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.querySelector('main').appendChild(renderer.domElement);
+      const controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+
+      // Mouse handling.
+      renderer.domElement.addEventListener('mousedown', () => { isMouseDown = true; });
+      renderer.domElement.addEventListener('mouseup', () => { isMouseDown = false; });
+      renderer.domElement.addEventListener('mousemove', event => {
+        const rect = renderer.domElement.getBoundingClientRect();
+        const mouseX = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        const mouseY = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        const vec = new THREE.Vector3(mouseX, mouseY, 0.5);
+        vec.unproject(camera);
+        mousePos.copy(vec);
+      });
+
+      // Update particle count interactively.
+      inputField.addEventListener('input', () => {
+        const val = parseInt(inputField.value);
+        if (!isNaN(val) && val > 0 && val <= 100000) {
+          particleCount = val;
+          resetParticles();
+        }
+      });
+
+      // Build a spatial grid to accelerate neighbor searches.
+      function buildGrid() {
+        const grid = {};
+        for (let i = 0; i < particleCount; i++) {
+          const i3 = i * 3;
+          const x = positions[i3];
+          const y = positions[i3 + 1];
+          const z = positions[i3 + 2];
+          const cellX = Math.floor((x - domainMin) / cellSize);
+          const cellY = Math.floor((y - domainMin) / cellSize);
+          const cellZ = Math.floor((z - domainMin) / cellSize);
+          const key = cellX + "_" + cellY + "_" + cellZ;
+          if (!grid[key]) grid[key] = [];
+          grid[key].push(i);
+        }
+        return grid;
+      }
+
+      // Initialize or reset particles with random positions and small random velocities.
+      function resetParticles() {
+        if (particleSystem) scene.remove(particleSystem);
+        positions = new Float32Array(particleCount * 3);
+        velocities = new Float32Array(particleCount * 3);
+        densities = new Float32Array(particleCount);
+        pressures = new Float32Array(particleCount);
+        for (let i = 0; i < particleCount; i++) {
+          const i3 = i * 3;
+          positions[i3] = (Math.random() - 0.5) * 2;
+          positions[i3 + 1] = (Math.random() - 0.5) * 2;
+          positions[i3 + 2] = (Math.random() - 0.5) * 2;
+          velocities[i3] = (Math.random() - 0.5) * 0.01;
+          velocities[i3 + 1] = (Math.random() - 0.5) * 0.01;
+          velocities[i3 + 2] = (Math.random() - 0.5) * 0.01;
+        }
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const material = new THREE.PointsMaterial({ color: 0x3399ff, size: 0.02 });
+        particleSystem = new THREE.Points(geometry, material);
+        scene.add(particleSystem);
+      }
+      resetParticles();
+
+      // SPH simulation update function.
+      function updateSimulation() {
+        // 1. Build the spatial grid for efficient neighbor lookups.
+        const grid = buildGrid();
+
+        // 2. Compute density and pressure using the poly6 kernel.
+        for (let i = 0; i < particleCount; i++) {
+          const i3 = i * 3;
+          const xi = positions[i3], yi = positions[i3 + 1], zi = positions[i3 + 2];
+          let density = 0;
+          const cellX = Math.floor((xi - domainMin) / cellSize);
+          const cellY = Math.floor((yi - domainMin) / cellSize);
+          const cellZ = Math.floor((zi - domainMin) / cellSize);
+          for (let offsetX = -1; offsetX <= 1; offsetX++) {
+            for (let offsetY = -1; offsetY <= 1; offsetY++) {
+              for (let offsetZ = -1; offsetZ <= 1; offsetZ++) {
+                const key = (cellX + offsetX) + "_" + (cellY + offsetY) + "_" + (cellZ + offsetZ);
+                if (grid[key]) {
+                  for (const j of grid[key]) {
+                    const j3 = j * 3;
+                    const dx = xi - positions[j3];
+                    const dy = yi - positions[j3 + 1];
+                    const dz = zi - positions[j3 + 2];
+                    const r2 = dx * dx + dy * dy + dz * dz;
+                    if (r2 < smoothingLength * smoothingLength) {
+                      density += mass * poly6Factor * Math.pow((smoothingLength * smoothingLength - r2), 3);
+                    }
+                  }
+                }
+              }
+            }
+          }
+          densities[i] = density;
+          pressures[i] = stiffness * (density - restDensity);
+        }
+
+        // 3. Compute pressure and viscosity forces, then update velocities.
+        for (let i = 0; i < particleCount; i++) {
+          const i3 = i * 3;
+          const xi = positions[i3], yi = positions[i3 + 1], zi = positions[i3 + 2];
+          let pressureForce = new THREE.Vector3(0, 0, 0);
+          let viscosityForce = new THREE.Vector3(0, 0, 0);
+
+          const cellX = Math.floor((xi - domainMin) / cellSize);
+          const cellY = Math.floor((yi - domainMin) / cellSize);
+          const cellZ = Math.floor((zi - domainMin) / cellSize);
+          for (let offsetX = -1; offsetX <= 1; offsetX++) {
+            for (let offsetY = -1; offsetY <= 1; offsetY++) {
+              for (let offsetZ = -1; offsetZ <= 1; offsetZ++) {
+                const key = (cellX + offsetX) + "_" + (cellY + offsetY) + "_" + (cellZ + offsetZ);
+                if (grid[key]) {
+                  for (const j of grid[key]) {
+                    if (j === i) continue;
+                    const j3 = j * 3;
+                    const dx = xi - positions[j3];
+                    const dy = yi - positions[j3 + 1];
+                    const dz = zi - positions[j3 + 2];
+                    const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    if (r < smoothingLength && r > 0.0001) {
+                      // Pressure force via the spiky kernel gradient.
+                      const gradW = spikyGradFactor * Math.pow((smoothingLength - r), 2);
+                      const nx = dx / r, ny = dy / r, nz = dz / r;
+                      const pressureTerm = (pressures[i] + pressures[j]) / (2 * densities[j]);
+                      pressureForce.x += -mass * pressureTerm * gradW * nx;
+                      pressureForce.y += -mass * pressureTerm * gradW * ny;
+                      pressureForce.z += -mass * pressureTerm * gradW * nz;
+                      
+                      // Viscosity force via the viscosity kernel Laplacian.
+                      const laplacianW = viscosityLapFactor * (smoothingLength - r);
+                      const vxDiff = velocities[j3] - velocities[i3];
+                      const vyDiff = velocities[j3 + 1] - velocities[i3 + 1];
+                      const vzDiff = velocities[j3 + 2] - velocities[i3 + 2];
+                      viscosityForce.x += viscosityCoefficient * mass * vxDiff / densities[j] * laplacianW;
+                      viscosityForce.y += viscosityCoefficient * mass * vyDiff / densities[j] * laplacianW;
+                      viscosityForce.z += viscosityCoefficient * mass * vzDiff / densities[j] * laplacianW;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // Add the gravitational force (applied along the negative y-axis).
+          const gravityForce = new THREE.Vector3(0, mass * gravity, 0);
+          const totalForce = new THREE.Vector3().add(pressureForce).add(viscosityForce).add(gravityForce);
+          // Acceleration = total force divided by density.
+          const acceleration = totalForce.divideScalar(densities[i]);
+          // Update velocity.
+          velocities[i3]   += acceleration.x * dt;
+          velocities[i3+1] += acceleration.y * dt;
+          velocities[i3+2] += acceleration.z * dt;
+        }
+
+        // Apply a global damping to gently reduce excessive speeds.
+        for (let i = 0; i < velocities.length; i++) {
+          velocities[i] *= 0.995;
+        }
+
+        // 4. Update positions based on velocities and enforce the boundaries of the invisible cube.
+        for (let i = 0; i < particleCount; i++) {
+          const i3 = i * 3;
+          positions[i3]   += velocities[i3] * dt;
+          positions[i3+1] += velocities[i3+1] * dt;
+          positions[i3+2] += velocities[i3+2] * dt;
+          // Clamp each axis to keep particles within the cube.
+          for (let axis = 0; axis < 3; axis++) {
+            const posIndex = i3 + axis;
+            if (positions[posIndex] > domainMax) {
+              positions[posIndex] = domainMax;
+              velocities[posIndex] *= -0.5; // Reverse and dampen velocity.
+            }
+            if (positions[posIndex] < domainMin) {
+              positions[posIndex] = domainMin;
+              velocities[posIndex] *= -0.5;
+            }
+          }
+        }
+      }
+
+      // Animation loop.
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        updateSimulation();
+        particleSystem.geometry.attributes.position.needsUpdate = true;
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    });
+  </script>
+</body>
+</html>
