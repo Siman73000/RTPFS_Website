@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>3D SPH Fluid Simulation</title>
+  <!-- FontAwesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css" />
+  <style>
+    /* RESET */
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { overflow:hidden; font-family: Inter, sans-serif; }
+    ul { list-style:none; }
+    a { text-decoration:none; color: inherit; }
+
+    /* Radial Menu Container—bottom center */
+    .nav {
+      position: fixed;
+      bottom: 25%;
+      left: 10%;
+      transform: translateX(-50%);
+      width: 75px;
+      height: 75px;
+      z-index: 300;
+      pointer-events: none;
+    }
+    .nav input[type="checkbox"] { display: none; }
+
+    /* Trigger button */
+    .nav label {
+      position: absolute;
+      bottom: 0; left: 0;
+      width: 75px; height: 75px;
+      background: #655be1; color: #fff;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.5rem; cursor: pointer;
+      pointer-events: auto; transition: background 0.2s;
+    }
+    .nav label:hover { background: #5146e1; }
+
+    /* Menu items initial: hidden */
+    .menu li {
+      position: absolute; bottom: 0; left: 0;
+      width: 50px; height: 50px;
+      transform: translate(12.5px,12.5px) scale(0);
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 0.3s ease, opacity 0.2s ease;
+    }
+    .menu li a {
+      width:100%; height:100%; border-radius:50%;
+      background:#655be1; color:#fff;
+      display:flex; align-items:center; justify-content:center;
+      font-size:1.2rem;
+      transition: background 0.3s;
+      pointer-events: auto;
+    }
+    .menu li a:hover { background: #5146e1; }
+    .menu li a span {
+      position:absolute; bottom:110%; left:50%; transform:translateX(-50%);
+      background:#fff; color:#21232a; padding:2px 6px; border-radius:3px;
+      font-size:0.75rem; white-space:nowrap;
+      opacity:0; transition:opacity 0.3s 0.2s;
+      pointer-events:none;
+    }
+    .nav input:checked ~ .menu li a span { opacity: 1; }
+
+    /* Radiate & show items when checked */
+    .nav input:checked ~ .menu li:nth-child(1) {
+      transform: translate(12.5px,-130px) scale(1);
+      opacity:1; transition-delay:0.1s; pointer-events:auto;
+    }
+    .nav input:checked ~ .menu li:nth-child(2) {
+      transform: translate(-105px,-65px) scale(1);
+      opacity:1; transition-delay:0.15s; pointer-events:auto;
+    }
+    .nav input:checked ~ .menu li:nth-child(3) {
+      transform: translate(130px,-65px) scale(1);
+      opacity:1; transition-delay:0.2s; pointer-events:auto;
+    }
+    .nav input:checked ~ .menu li:nth-child(4) {
+      transform: translate(12.5px,80px) scale(1);
+      opacity:1; transition-delay:0.25s; pointer-events:auto;
+    }
+
+    /* Fullscreen simulation canvas */
+    main { width:100vw; height:100vh; }
+    canvas { width:100%; height:100%; display:block; }
+  </style>
+</head>
+<body>
+
+  <!-- Hidden color picker inputs -->
+  <input type="color" id="fluidColorPicker" style="display:none;" />
+  <input type="color" id="bgColorPicker" style="display:none;" />
+
+  <!-- Radial Bottom-Centered Menu -->
+  <nav class="nav">
+    <input id="menu" type="checkbox" />
+    <label for="menu"><i class="fas fa-bars"></i></label>
+    <ul class="menu">
+      <li><a id="setParticles" href="#!"><i class="fas fa-sliders-h"></i><span>Particles</span></a></li>
+      <li><a id="pickFluidColor" href="#!"><i class="fas fa-tint"></i><span>Fluid</span></a></li>
+      <li><a id="setBlur" href="#!"><i class="fas fa-burn"></i><span>Blur</span></a></li>
+      <li><a id="pickBgColor" href="#!"><i class="fas fa-paint-brush"></i><span>BG</span></a></li>
+    </ul>
+  </nav>
+
+  <!-- Simulation Canvas -->
+  <main></main>  <!-- Three.js libs & script.js -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/HorizontalBlurShader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/VerticalBlurShader.js"></script> 
+  <script src="script.js"></script> 
+  <script>
+    // Key state
+    let isEDown = false, isShiftDown = false;
+    window.addEventListener('keydown', e => {
+      if (e.key === 'e' || e.key === 'E') isEDown = true;
+      if (e.key === 'Shift') isShiftDown = true;
+    });
+    window.addEventListener('keyup', e => {
+      if (e.key === 'e' || e.key === 'E') isEDown = false;
+      if (e.key === 'Shift') isShiftDown = false;
+    });
+
+    // SPH constants
+    const mass = 1, dt = 0.0005, gravity = -1000000;
+    const restDensity = 1000, stiffness = 500, viscosityCoefficient = 0.5;
+    const smoothingLength = 0.15;
+    const poly6Factor = 315 / (64 * Math.PI * Math.pow(smoothingLength, 9));
+    const spikyGradFactor = -45 / (Math.PI * Math.pow(smoothingLength, 6));
+    const viscLapFactor = 45 / (Math.PI * Math.pow(smoothingLength, 6));
+    const domainMin = -1, domainMax = 1, cellSize = smoothingLength;
+    const interactionRadius = 0.8, interactionStrength = 2.9e6;
+
+    let particleCount, positions, velocities, densities, pressures, particleSystem;
+
+    // Create particle texture
+    function createCircleTexture() {
+      const size = 512;
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      const ctx = c.getContext('2d');
+      const grad = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+      grad.addColorStop(0, 'rgba(173,216,230,1)');
+      grad.addColorStop(0.5, 'rgba(30,144,255,0.8)');
+      grad.addColorStop(1, 'rgba(30,144,255,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, size, size);
+      return new THREE.CanvasTexture(c);
+    }
+    const particleTex = createCircleTexture();
+
+    // Scene & camera
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x000000, 0.15);
+    const camera = new THREE.PerspectiveCamera(
+      75, window.innerWidth / window.innerHeight, 0.1, 100
+    );
+    camera.position.z = 3;
+
+    // Renderer
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x000000);
+    document.querySelector('main').appendChild(renderer.domElement);
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    // Postprocessing
+    const composer = new THREE.EffectComposer(renderer);
+    composer.setSize(window.innerWidth, window.innerHeight);
+    composer.addPass(new THREE.RenderPass(scene, camera));
+    const hBlur = new THREE.ShaderPass(THREE.HorizontalBlurShader);
+    const vBlur = new THREE.ShaderPass(THREE.VerticalBlurShader);
+    hBlur.uniforms.h.value = 1 / window.innerWidth * 2;
+    vBlur.uniforms.v.value = 1 / window.innerHeight * 2;
+    composer.addPass(hBlur);
+    vBlur.renderToScreen = true;
+    composer.addPass(vBlur);
+
+    // Mouse raycasting
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    renderer.domElement.addEventListener('mousemove', e => {
+      mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    });
+    renderer.domElement.addEventListener('mousemove', e => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      // clientX/Y → [0..1] across the canvas
+      const x = (e.clientX - rect.left)  / rect.width;
+      const y = (e.clientY - rect.top)   / rect.height;
+      // remap to NDC:
+      mouse.x =  x * 2 - 1;
+      mouse.y = -y * 2 + 1;
+    });
+
+    // Build spatial hash grid
+    function buildGrid() {
+      const grid = {};
+      for (let i = 0; i < particleCount; i++) {
+        const i3 = 3 * i;
+        const cx = Math.floor((positions[i3] - domainMin) / cellSize);
+        const cy = Math.floor((positions[i3+1] - domainMin) / cellSize);
+        const cz = Math.floor((positions[i3+2] - domainMin) / cellSize);
+        const key = `${cx}_${cy}_${cz}`;
+        (grid[key] = grid[key] || []).push(i);
+      }
+      return grid;
+    }
+
+    // Reset particle system
+    function resetParticles() {
+      if (particleSystem) scene.remove(particleSystem);
+      positions = new Float32Array(particleCount * 3);
+      velocities = new Float32Array(particleCount * 3);
+      densities = new Float32Array(particleCount);
+      pressures = new Float32Array(particleCount);
+
+      for (let i = 0; i < particleCount; i++) {
+        const i3 = 3 * i;
+        positions[i3]   = Math.random() * 2 - 1;
+        positions[i3+1] = Math.random() * 2 - 1;
+        positions[i3+2] = Math.random() * 2 - 1;
+        velocities[i3] = velocities[i3+1] = velocities[i3+2] = 0;
+      }
+
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const mat = new THREE.PointsMaterial({
+        map: particleTex,
+        size: 0.3,
+        transparent: true,
+        opacity: 0.25,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        sizeAttenuation: true,
+        color: 0x1ca3ec
+      });
+      particleSystem = new THREE.Points(geom, mat);
+      scene.add(particleSystem);
+    }
+
+    // SPH update
+    function updateSimulation() {
+      const grid = buildGrid();
+
+      // Compute density & pressure
+      for (let i = 0; i < particleCount; i++) {
+        const i3 = 3 * i;
+        let density = 0;
+        const xi = positions[i3], yi = positions[i3+1], zi = positions[i3+2];
+        const cx = Math.floor((xi - domainMin) / cellSize);
+        const cy = Math.floor((yi - domainMin) / cellSize);
+        const cz = Math.floor((zi - domainMin) / cellSize);
+
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dz = -1; dz <= 1; dz++) {
+              const key = `${cx+dx}_${cy+dy}_${cz+dz}`;
+              const cell = grid[key];
+              if (!cell) continue;
+
+              for (const j of cell) {
+                const j3 = 3 * j;
+                const rx = xi - positions[j3],
+                      ry = yi - positions[j3+1],
+                      rz = zi - positions[j3+2];
+                const r2 = rx*rx + ry*ry + rz*rz;
+                if (r2 < smoothingLength*smoothingLength) {
+                  density += mass * poly6Factor *
+                    Math.pow(smoothingLength*smoothingLength - r2, 3);
+                }
+              }
+            }
+          }
+        }
+
+        densities[i] = density;
+        pressures[i] = stiffness * (density - restDensity);
+      }
+
+      // Compute forces & integrate
+      for (let i = 0; i < particleCount; i++) {
+        const i3 = 3 * i;
+        const xi = positions[i3], yi = positions[i3+1], zi = positions[i3+2];
+        const cx = Math.floor((xi - domainMin) / cellSize);
+        const cy = Math.floor((yi - domainMin) / cellSize);
+        const cz = Math.floor((zi - domainMin) / cellSize);
+
+        let pForce = new THREE.Vector3();
+        let vForce = new THREE.Vector3();
+
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dz = -1; dz <= 1; dz++) {
+              const key = `${cx+dx}_${cy+dy}_${cz+dz}`;
+              const cell = grid[key];
+              if (!cell) continue;
+
+              for (const j of cell) {
+                if (j === i) continue;
+                const j3 = 3 * j;
+                const rx = xi - positions[j3],
+                      ry = yi - positions[j3+1],
+                      rz = zi - positions[j3+2];
+                const r = Math.sqrt(rx*rx + ry*ry + rz*rz);
+
+                if (r < smoothingLength && r > 1e-6) {
+                  const gradW = spikyGradFactor * Math.pow(smoothingLength - r, 2);
+                  const nx = rx / r, ny = ry / r, nz = rz / r;
+                  const pterm = (pressures[i] + pressures[j]) / (2 * densities[j]);
+
+                  pForce.x += -mass * pterm * gradW * nx;
+                  pForce.y += -mass * pterm * gradW * ny;
+                  pForce.z += -mass * pterm * gradW * nz;
+
+                  const lapW = viscLapFactor * (smoothingLength - r);
+                  vForce.x += viscosityCoefficient * mass *
+                    (velocities[j3] - velocities[i3]) / densities[j] * lapW;
+                  vForce.y += viscosityCoefficient * mass *
+                    (velocities[j3+1] - velocities[i3+1]) / densities[j] * lapW;
+                  vForce.z += viscosityCoefficient * mass *
+                    (velocities[j3+2] - velocities[i3+2]) / densities[j] * lapW;
+                }
+              }
+            }
+          }
+        }
+
+        const grav = new THREE.Vector3(0, mass * gravity, 0);
+        raycaster.setFromCamera(mouse, camera);
+        const dist = raycaster.ray.distanceToPoint(
+          new THREE.Vector3(xi, yi, zi)
+        );
+
+        let interact = new THREE.Vector3();
+        if (isEDown && dist < interactionRadius) {
+          const closest = new THREE.Vector3();
+          raycaster.ray.closestPointToPoint(
+            new THREE.Vector3(xi, yi, zi),
+            closest
+          );
+          interact.copy(
+            new THREE.Vector3(xi, yi, zi).sub(closest)
+          ).normalize();
+          let s = interactionStrength * (1 - dist / interactionRadius);
+          if (isShiftDown) s = -s;
+          interact.multiplyScalar(s);
+        }
+
+        const totalF = pForce.add(vForce).add(grav).add(interact);
+        velocities[i3]   += (totalF.x / densities[i])   * dt;
+        velocities[i3+1] += (totalF.y / densities[i])   * dt;
+        velocities[i3+2] += (totalF.z / densities[i])   * dt;
+      }
+
+      // Dampen and move
+      for (let i = 0; i < velocities.length; i++) {
+        velocities[i] *= 0.995;
+      }
+      for (let i = 0; i < particleCount; i++) {
+        const i3 = 3 * i;
+        positions[i3]   += velocities[i3]   * dt;
+        positions[i3+1] += velocities[i3+1] * dt;
+        positions[i3+2] += velocities[i3+2] * dt;
+        for (let k = 0; k < 3; k++) {
+          const idx = i3 + k;
+          if (positions[idx] > domainMax) {
+            positions[idx] = domainMax;
+            velocities[idx] *= -0.5;
+          }
+          if (positions[idx] < domainMin) {
+            positions[idx] = domainMin;
+            velocities[idx] *= -0.5;
+          }
+        }
+      }
+    }
+
+    // Animation loop
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      updateSimulation();
+      particleSystem.geometry.attributes.position.needsUpdate = true;
+      composer.render();
+    }
+
+    // Bootstrap
+    particleCount = 1000;
+    resetParticles();
+    animate();
+
+    // Sidebar controls
+    const particleInput = document.getElementById('particleCountInput');
+    const colorPicker   = document.getElementById('colorPicker');
+    const blurRange     = document.getElementById('blurRange');
+
+    particleInput.addEventListener('change', e => {
+      const v = parseInt(e.target.value, 10);
+      if (!isNaN(v) && v >= 1 && v <= 100000) {
+        particleCount = v;
+        resetParticles();
+      }
+    });
+
+    colorPicker.addEventListener('input', e => {
+      if (particleSystem) particleSystem.material.color.set(e.target.value);
+    });
+
+    blurRange.addEventListener('input', e => {
+      const amt = parseFloat(e.target.value);
+      hBlur.uniforms.h.value = amt / window.innerWidth * 2;
+      vBlur.uniforms.v.value = amt / window.innerHeight * 2;
+      renderer.domElement.style.filter = `blur(${amt}px)`;
+    });
+
+
+
+    // Handle resize
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      composer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
